@@ -35,16 +35,26 @@ def process_document_and_validate(uploaded_file, nipost_code):
         if nipost_state != doc_state:
             return False, f"🚨 GEO-MISMATCH DETECTED: NIPOST is for {nipost_state}, but the document text says {doc_state}. Upload Rejected.", None
 
-        # EXTRACT VOTES (Basic Regex)
+        # --- UPGRADED VOTE EXTRACTION (REGEX) ---
         votes = {"APC": 0, "PDP": 0, "LP": 0, "NDC": 0, "ADC": 0}
+        
+        # This regex looks for the Party name, then skips any characters until it finds a large number (4+ digits)
+        # It handles the formatting of the INEC form.
         try:
-            if "APC" in text_upper:
-                apc_match = re.search(r'APC\s+(\d+)', text_upper)
-                if apc_match: votes["APC"] = int(apc_match.group(1))
-            if "PDP" in text_upper:
-                pdp_match = re.search(r'PDP\s+(\d+)', text_upper)
-                if pdp_match: votes["PDP"] = int(pdp_match.group(1))
-        except:
+            # APC extraction
+            apc_match = re.search(r'APC.*?(\d{4,})', text_upper)
+            if apc_match: votes["APC"] = int(apc_match.group(1))
+            
+            # PDP extraction
+            pdp_match = re.search(r'PDP.*?(\d{4,})', text_upper)
+            if pdp_match: votes["PDP"] = int(pdp_match.group(1))
+
+            # LP extraction
+            lp_match = re.search(r'LP.*?(\d{2,})', text_upper)
+            if lp_match: votes["LP"] = int(lp_match.group(1))
+
+        except Exception as e:
+            print(f"Extraction error: {e}")
             pass 
 
         return True, f"✅ GEO-MATCH VERIFIED: Document ({doc_state}) matches NIPOST ({nipost_state}).", votes
@@ -106,11 +116,11 @@ if page == "Volunteer Capture Portal":
     with col2:
         pdp_votes = st.number_input("PDP", min_value=0, value=st.session_state.extracted_votes.get('PDP', 0))
     with col3:
-        lp_votes = st.number_input("LP", min_value=0, value=0)
+        lp_votes = st.number_input("LP", min_value=0, value=st.session_state.extracted_votes.get('LP', 0))
     with col4:
-        ndc_votes = st.number_input("NDC", min_value=0, value=0)
+        ndc_votes = st.number_input("NDC", min_value=0, value=st.session_state.extracted_votes.get('NDC', 0))
     with col5:
-        adc_votes = st.number_input("ADC", min_value=0, value=0)
+        adc_votes = st.number_input("ADC", min_value=0, value=st.session_state.extracted_votes.get('ADC', 0))
 
     if st.button("Secure & Add to National Aggregation"):
         if uploaded_file is None or not pu_name or not nipost_code:
