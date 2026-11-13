@@ -12,13 +12,9 @@ def validate_nipost_format(postcode):
         return True, "Valid Format"
     return False, "Invalid Format"
 
-# --- INITIALIZE SESSION STATE (Pre-populated with verified sample data) ---
+# --- INITIALIZE SESSION STATE (Starts completely empty) ---
 if 'evidence_db' not in st.session_state:
-    st.session_state.evidence_db = [
-        {"level": "PU", "pu": "PU-AMAC-01", "parent": "GENESIS", "hash": "a1b2c3d4e5f6g7h8", "time": "2027-02-25 14:30", "votes": {"APC": 150, "PDP": 80, "LP": 200, "NDC": 10, "ADC": 5}},
-        {"level": "Ward", "pu": "Ward-AMAC-1", "parent": "a1b2c3d4e5f6g7h8", "hash": "e5f6g7h8i9j0k1l2", "time": "2027-02-25 16:45", "votes": {"APC": 150, "PDP": 80, "LP": 200, "NDC": 10, "ADC": 5}},
-        {"level": "LGA", "pu": "LGA-AMAC", "parent": "e5f6g7h8i9j0k1l2", "hash": "i9j0k1l2m3n4o5p6", "time": "2027-02-25 19:00", "votes": {"APC": 150, "PDP": 80, "LP": 200, "NDC": 10, "ADC": 5}},
-    ]
+    st.session_state.evidence_db = []  # <--- THIS IS THE FIX: No pre-filled data
 
 # --- WEB PAGE CONFIGURATION ---
 st.set_page_config(page_title="Civic Audit MVP", page_icon="🛡️", layout="wide")
@@ -102,6 +98,7 @@ elif page == "The 'Holy Grail' National Dashboard":
     
     # --- DEMO BUTTON FOR INVESTORS ---
     st.write("### Simulation Controls")
+    st.caption("Click this to test the system with 1,000 synthetic records. (This is for demonstration purposes only).")
     if st.button("🚀 Inject Demo Data (1,000 Polling Units)"):
         for i in range(1000):
             db.append({
@@ -129,7 +126,7 @@ elif page == "The 'Holy Grail' National Dashboard":
     col1, col2, col3 = st.columns(3)
     col1.metric("Total Verified Evidence", f"{len(db):,}", delta="Live")
     col2.metric("Chain Breaks Detected", "0", delta="Secure", delta_color="normal")
-    col3.metric("Data Integrity", "100%", delta="SHA-256 Verified")
+    col3.metric("Data Integrity", "100%" if len(db) > 0 else "N/A", delta="SHA-256 Verified" if len(db) > 0 else None)
 
     st.divider()
 
@@ -143,27 +140,33 @@ elif page == "The 'Holy Grail' National Dashboard":
 
     # --- VISUAL CHART ---
     st.write("### 3. Verified Vote Distribution")
-    chart_data = pd.DataFrame({
-        "Party": ["APC", "PDP", "LP", "NDC", "ADC"],
-        "Votes": [total_apc, total_pdp, total_lp, total_ndc, total_adc]
-    })
-    st.bar_chart(chart_data.set_index("Party"), height=400)
+    if len(db) > 0:
+        chart_data = pd.DataFrame({
+            "Party": ["APC", "PDP", "LP", "NDC", "ADC"],
+            "Votes": [total_apc, total_pdp, total_lp, total_ndc, total_adc]
+        })
+        st.bar_chart(chart_data.set_index("Party"), height=400)
+    else:
+        st.info("No evidence uploaded yet. The chart will populate as volunteers submit verified documents.")
 
     st.divider()
 
     # --- EMPIRICAL PROOF TRAIL ---
     st.write("### 4. Empirical Proof Trail (Sample of Latest Uploads)")
-    proof_data = []
-    for item in db[-10:]:
-        proof_data.append({
-            "Level": item['level'],
-            "Location": item['pu'],
-            "Parent Hash": item['parent'][:10] + "...",
-            "Current Hash": item['hash'][:10] + "...",
-            "APC": item['votes']['APC'],
-            "PDP": item['votes']['PDP'],
-            "LP": item['votes']['LP'],
-        })
-    st.dataframe(pd.DataFrame(proof_data), use_container_width=True)
+    if len(db) > 0:
+        proof_data = []
+        for item in db[-10:]:
+            proof_data.append({
+                "Level": item['level'],
+                "Location": item['pu'],
+                "Parent Hash": item['parent'][:10] + "...",
+                "Current Hash": item['hash'][:10] + "...",
+                "APC": item['votes']['APC'],
+                "PDP": item['votes']['PDP'],
+                "LP": item['votes']['LP'],
+            })
+        st.dataframe(pd.DataFrame(proof_data), use_container_width=True)
+    else:
+        st.info("Awaiting first upload to display cryptographic proof trail.")
     
     st.info("💡 **Why this is different from a WhatsApp photo:** Every single vote above is bound to a SHA-256 hash. If even one pixel of the uploaded EC8A form is altered, the hash breaks, the parent chain breaks, and the system rejects it.")
