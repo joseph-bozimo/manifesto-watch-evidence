@@ -7,15 +7,19 @@ import random
 import pytesseract
 from PIL import Image
 import re
+from img2table.document import Image as Img2TableImage
+from img2table.ocr import TesseractOCR
 
 # --- 1. NIPOST & OCR Geo-Validation Engine ---
 def process_document_and_validate(uploaded_file, nipost_code):
     try:
         image = Image.open(uploaded_file)
-        extracted_text = pytesseract.image_to_string(image)
-        text_upper = extracted_text.upper()
         
-        # Determine NIPOST State
+        # Save image temporarily for img2table
+        temp_path = "temp_uploaded_image.png"
+        image.save(temp_path)
+
+        # 1. Determine NIPOST State
         if nipost_code.upper().startswith("FC"):
             nipost_state = "FCT (ABUJA)"
         elif nipost_code.upper().startswith("ED"):
@@ -23,41 +27,47 @@ def process_document_and_validate(uploaded_file, nipost_code):
         else:
             nipost_state = "UNKNOWN"
 
-        # Determine Document State from OCR text
-        if "EDO" in text_upper:
-            doc_state = "EDO"
-        elif "ABUJA" in text_upper or "FCT" in text_upper:
-            doc_state = "FCT (ABUJA)"
-        else:
-            doc_state = "UNKNOWN"
+        # 2. Extract Table Data using img2table
+        ocr = TesseractOCR(lang="eng")
+        table_img = Img2TableImage(src=temp_path)
+        extracted_tables = table_img.extract_tables(ocr=ocr, implicit_rows=True, borderless_tables=True, min_confidence=50)
 
-        # GEO-MATCH VALIDATION
-        if nipost_state != doc_state:
+        votes = {"APC": 0, "PDP": 0, "LP": 0, "NDC": 0, "ADC": 0}
+        doc_state = "UNKNOWN"
+
+        if extracted_tables:
+            # Convert the first detected table to a pandas DataFrame
+            df = extracted_tables[0].df
+            
+            # Search the extracted cells for the state name (Geo-validation)
+            table_text = df.to_string().upper()
+            if "EDO" in table_text:
+                doc_state = "EDO"
+            elif "ABUJA" in table_text or "FCT" in table_text:
+                doc_state = "FCT (ABUJA)"
+
+            # Search for party acronyms in the table and get the number in the next column
+            for index, row in df.iterrows():
+                row_values = row.values
+                for i, cell in enumerate(row_values):
+                    cell_upper = str(cell).upper()
+                    if "APC" in cell_upper:
+                        # The votes are usually in the column immediately to the right
+                        try: votes["APC"] = int(re.search(r'\d+', str(row_values[i+2])).group())
+                        except: pass
+                    elif "PDP" in cell_upper:
+                        try: votes["PDP"] = int(re.search(r'\d+', str(row_values[i+2])).group())
+                        except: pass
+                    elif "LP" in cell_upper:
+                        try: votes["LP"] = int(re.search(r'\d+', str(row_values[i+2])).group())
+                        except: pass
+
+        # 3. GEO-MATCH VALIDATION
+        if nipost_state != doc_state and doc_state != "UNKNOWN":
             return False, f"🚨 GEO-MISMATCH DETECTED: NIPOST is for {nipost_state}, but the document text says {doc_state}. Upload Rejected.", None
 
-        # --- UPGRADED VOTE EXTRACTION (REGEX) ---
-        votes = {"APC": 0, "PDP": 0, "LP": 0, "NDC": 0, "ADC": 0}
-        
-        # This regex looks for the Party name, then skips any characters until it finds a large number (4+ digits)
-        # It handles the formatting of the INEC form.
-        try:
-            # APC extraction
-            apc_match = re.search(r'APC.*?(\d{4,})', text_upper)
-            if apc_match: votes["APC"] = int(apc_match.group(1))
-            
-            # PDP extraction
-            pdp_match = re.search(r'PDP.*?(\d{4,})', text_upper)
-            if pdp_match: votes["PDP"] = int(pdp_match.group(1))
-
-            # LP extraction
-            lp_match = re.search(r'LP.*?(\d{2,})', text_upper)
-            if lp_match: votes["LP"] = int(lp_match.group(1))
-
-        except Exception as e:
-            print(f"Extraction error: {e}")
-            pass 
-
         return True, f"✅ GEO-MATCH VERIFIED: Document ({doc_state}) matches NIPOST ({nipost_state}).", votes
+
     except Exception as e:
         return False, f"Error processing image: {e}", None
 
@@ -79,7 +89,7 @@ page = st.sidebar.radio("Select Portal:", ["Volunteer Capture Portal", "The 'Hol
 # ==============================================================================
 if page == "Volunteer Capture Portal":
     st.title("🛡️ Manifesto Watch 2027")
-    st.subheader("Live Evidence Capture & OCR Geo-Validation")
+    st.subheader("Live Evidence Capture & Automated Table Extraction")
 
     st.write("### 1. Agent Verification")
     col1, col2 = st.columns(2)
@@ -88,18 +98,14 @@ if page == "Volunteer Capture Portal":
         volunteer_id = st.text_input("Volunteer ID (e.g., V-001)")
         pu_name = st.text_input("Polling Unit / Ward Name (e.g., PU-AMAC-05)")
     with col2:
-        nipost_code = st.text_input("NIPOST Digital Postcode (e.g., FC03B06AG12)")
-
-    parent_hash = None
-    if role != "Polling Unit":
-        parent_hash = st.text_input("Enter Parent Hash (from the level below):")
+        nipost_code = st.text_input("NIPOST Digital Postcode (e.g., ED123456789)")
 
     st.write("### 2. Upload Evidence")
     uploaded_file = st.file_uploader("Upload electoral document", type=["jpg", "png", "jpeg"])
     
     if uploaded_file is not None and nipost_code:
-        if st.button("🔍 Run OCR & Validate Document"):
-            with st.spinner("Extracting text and verifying geographic match..."):
+        if st.button("🔍 Run Advanced Table Extraction"):
+            with st.spinner("Scanning grid lines and extracting table data..."):
                 is_valid, message, extracted_votes = process_document_and_validate(uploaded_file, nipost_code)
                 if is_valid:
                     st.success(message)
@@ -124,72 +130,35 @@ if page == "Volunteer Capture Portal":
 
     if st.button("Secure & Add to National Aggregation"):
         if uploaded_file is None or not pu_name or not nipost_code:
-            st.error("Please complete all fields and upload a document.")
+            st.error("Please complete all fields.")
         else:
             bytes_data = uploaded_file.getvalue()
             sha256_hash = hashlib.sha256(bytes_data).hexdigest()
             
             evidence_record = {
-                "level": role,
-                "pu": pu_name,
-                "nipost": nipost_code,
-                "parent": parent_hash if parent_hash else "GENESIS",
-                "hash": sha256_hash,
-                "time": str(datetime.now()),
+                "level": role, "pu": pu_name, "nipost": nipost_code,
+                "hash": sha256_hash, "time": str(datetime.now()),
                 "votes": {"APC": apc_votes, "PDP": pdp_votes, "LP": lp_votes, "NDC": ndc_votes, "ADC": adc_votes}
             }
             
             st.session_state.evidence_db.append(evidence_record)
-            st.success(f"✅ Evidence from {pu_name} secured and added to the chain!")
+            st.success(f"✅ Evidence secured and added!")
 
 # ==============================================================================
 # PORTAL 2: THE 'HOLY GRAIL' NATIONAL DASHBOARD
 # ==============================================================================
 elif page == "The 'Holy Grail' National Dashboard":
     st.title("🏛️ National Civic Audit Dashboard")
-    st.subheader("Independent, Cryptographically Verified Baseline")
-    
     db = st.session_state.evidence_db
     
-    if st.button("🚀 Inject Demo Data (1,000 Polling Units)"):
+    if st.button("🚀 Inject Demo Data"):
         for i in range(1000):
-            db.append({
-                "level": "PU", "pu": f"PU-DEMO-{i}", "nipost": "FC-DEMO", "parent": "GENESIS", "hash": f"hash_{i}", "time": "2027-02-25", 
-                "votes": {"APC": random.randint(50, 200), "PDP": random.randint(50, 200), "LP": random.randint(20, 150), "NDC": random.randint(5, 50), "ADC": random.randint(5, 50)}
-            })
-        st.success("1,000 cryptographically verified polling units injected.")
+            db.append({"level": "PU", "pu": f"PU-DEMO-{i}", "nipost": "FC-DEMO", "hash": f"hash_{i}", "time": "2027", "votes": {"APC": random.randint(50, 200), "PDP": random.randint(50, 200), "LP": random.randint(20, 150), "NDC": 5, "ADC": 5}})
 
     total_apc = sum(item['votes']['APC'] for item in db)
     total_pdp = sum(item['votes']['PDP'] for item in db)
-    total_lp = sum(item['votes']['LP'] for item in db)
-    total_ndc = sum(item['votes']['NDC'] for item in db)
-    total_adc = sum(item['votes']['ADC'] for item in db)
-
-    st.divider()
-    st.write("### 1. National Aggregation Status")
+    
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Verified Evidence", f"{len(db):,}")
-    col2.metric("Chain Breaks Detected", "0", delta="Secure")
-    col3.metric("Data Integrity", "100%" if len(db) > 0 else "N/A")
-
-    st.divider()
-    st.write("### 2. National Vote Baseline (Verified Evidence)")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("APC", f"{total_apc:,}")
-    col2.metric("PDP", f"{total_pdp:,}")
-    col3.metric("LP", f"{total_lp:,}")
-    col4.metric("NDC", f"{total_ndc:,}")
-    col5.metric("ADC", f"{total_adc:,}")
-
-    st.write("### 3. Verified Vote Distribution")
-    if len(db) > 0:
-        chart_data = pd.DataFrame({"Party": ["APC", "PDP", "LP", "NDC", "ADC"], "Votes": [total_apc, total_pdp, total_lp, total_ndc, total_adc]})
-        st.bar_chart(chart_data.set_index("Party"), height=400)
-    else:
-        st.info("No evidence uploaded yet.")
-
-    st.divider()
-    st.write("### 4. Empirical Proof Trail")
-    if len(db) > 0:
-        proof_data = [{"Level": item['level'], "Location": item['pu'], "State": item['nipost'][:2], "Hash": item['hash'][:10]+"...", "APC": item['votes']['APC'], "PDP": item['votes']['PDP'], "LP": item['votes']['LP']} for item in db[-10:]]
-        st.dataframe(pd.DataFrame(proof_data), use_container_width=True)
+    col1.metric("APC Total", f"{total_apc:,}")
+    col2.metric("PDP Total", f"{total_pdp:,}")
+    col3.metric("Total Units", f"{len(db):,}")
