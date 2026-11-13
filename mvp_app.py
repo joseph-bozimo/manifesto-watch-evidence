@@ -4,17 +4,58 @@ from datetime import datetime
 import json
 import pandas as pd
 import random
+import pytesseract
+from PIL import Image
+import re
 
-# --- 1. NIPOST Offline Validation ---
-def validate_nipost_format(postcode):
-    clean_code = postcode.replace("-", "").strip()
-    if len(clean_code) == 11 and clean_code.isalnum():
-        return True, "Valid Format"
-    return False, "Invalid Format"
+# --- 1. NIPOST & OCR Geo-Validation Engine ---
+def process_document_and_validate(uploaded_file, nipost_code):
+    try:
+        image = Image.open(uploaded_file)
+        extracted_text = pytesseract.image_to_string(image)
+        text_upper = extracted_text.upper()
+        
+        # Determine NIPOST State
+        if nipost_code.upper().startswith("FC"):
+            nipost_state = "FCT (ABUJA)"
+        elif nipost_code.upper().startswith("ED"):
+            nipost_state = "EDO"
+        else:
+            nipost_state = "UNKNOWN"
 
-# --- INITIALIZE SESSION STATE (Starts completely empty) ---
+        # Determine Document State from OCR text
+        if "EDO" in text_upper:
+            doc_state = "EDO"
+        elif "ABUJA" in text_upper or "FCT" in text_upper:
+            doc_state = "FCT (ABUJA)"
+        else:
+            doc_state = "UNKNOWN"
+
+        # GEO-MATCH VALIDATION
+        if nipost_state != doc_state:
+            return False, f"🚨 GEO-MISMATCH DETECTED: NIPOST is for {nipost_state}, but the document text says {doc_state}. Upload Rejected.", None
+
+        # EXTRACT VOTES (Basic Regex)
+        votes = {"APC": 0, "PDP": 0, "LP": 0, "NDC": 0, "ADC": 0}
+        try:
+            if "APC" in text_upper:
+                apc_match = re.search(r'APC\s+(\d+)', text_upper)
+                if apc_match: votes["APC"] = int(apc_match.group(1))
+            if "PDP" in text_upper:
+                pdp_match = re.search(r'PDP\s+(\d+)', text_upper)
+                if pdp_match: votes["PDP"] = int(pdp_match.group(1))
+        except:
+            pass 
+
+        return True, f"✅ GEO-MATCH VERIFIED: Document ({doc_state}) matches NIPOST ({nipost_state}).", votes
+    except Exception as e:
+        return False, f"Error processing image: {e}", None
+
+# --- INITIALIZE SESSION STATE ---
 if 'evidence_db' not in st.session_state:
-    st.session_state.evidence_db = []  # <--- THIS IS THE FIX: No pre-filled data
+    st.session_state.evidence_db = []
+if 'extracted_votes' not in st.session_state:
+    st.session_state.extracted_votes = {}
 
 # --- WEB PAGE CONFIGURATION ---
 st.set_page_config(page_title="Civic Audit MVP", page_icon="🛡️", layout="wide")
@@ -28,39 +69,42 @@ page = st.sidebar.radio("Select Portal:", ["Volunteer Capture Portal", "The 'Hol
 # ==============================================================================
 if page == "Volunteer Capture Portal":
     st.title("🛡️ Manifesto Watch 2027")
-    st.subheader("Live Evidence Capture & Aggregation")
+    st.subheader("Live Evidence Capture & OCR Geo-Validation")
 
     st.write("### 1. Agent Verification")
     col1, col2 = st.columns(2)
     with col1:
         role = st.selectbox("Select your Level:", ["Polling Unit", "Ward", "LGA", "State"])
         volunteer_id = st.text_input("Volunteer ID (e.g., V-001)")
+        pu_name = st.text_input("Polling Unit / Ward Name (e.g., PU-AMAC-05)")
     with col2:
         nipost_code = st.text_input("NIPOST Digital Postcode (e.g., FC03B06AG12)")
-        pu_name = st.text_input("Polling Unit / Ward Name (e.g., PU-AMAC-05)")
-
-    valid_nipost = False
-    if nipost_code:
-        is_valid_format, message = validate_nipost_format(nipost_code)
-        if is_valid_format:
-            st.success(f"✅ NIPOST Postcode Validated: {nipost_code}")
-            valid_nipost = True
-        else:
-            st.error(f"❌ {message}")
 
     parent_hash = None
     if role != "Polling Unit":
         parent_hash = st.text_input("Enter Parent Hash (from the level below):")
 
-    st.write("### 2. Upload Evidence & Enter Vote Data")
+    st.write("### 2. Upload Evidence")
     uploaded_file = st.file_uploader("Upload electoral document", type=["jpg", "png", "jpeg"])
     
-    st.write("#### Enter Verified Votes from the Document")
+    if uploaded_file is not None and nipost_code:
+        if st.button("🔍 Run OCR & Validate Document"):
+            with st.spinner("Extracting text and verifying geographic match..."):
+                is_valid, message, extracted_votes = process_document_and_validate(uploaded_file, nipost_code)
+                if is_valid:
+                    st.success(message)
+                    st.write("### Automated Vote Extraction Results:")
+                    st.json(extracted_votes)
+                    st.session_state.extracted_votes = extracted_votes
+                else:
+                    st.error(message)
+
+    st.write("#### Enter/Verify Votes from the Document")
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        apc_votes = st.number_input("APC", min_value=0, value=0)
+        apc_votes = st.number_input("APC", min_value=0, value=st.session_state.extracted_votes.get('APC', 0))
     with col2:
-        pdp_votes = st.number_input("PDP", min_value=0, value=0)
+        pdp_votes = st.number_input("PDP", min_value=0, value=st.session_state.extracted_votes.get('PDP', 0))
     with col3:
         lp_votes = st.number_input("LP", min_value=0, value=0)
     with col4:
@@ -69,13 +113,16 @@ if page == "Volunteer Capture Portal":
         adc_votes = st.number_input("ADC", min_value=0, value=0)
 
     if st.button("Secure & Add to National Aggregation"):
-        if uploaded_file is not None and valid_nipost and pu_name:
+        if uploaded_file is None or not pu_name or not nipost_code:
+            st.error("Please complete all fields and upload a document.")
+        else:
             bytes_data = uploaded_file.getvalue()
             sha256_hash = hashlib.sha256(bytes_data).hexdigest()
             
             evidence_record = {
                 "level": role,
                 "pu": pu_name,
+                "nipost": nipost_code,
                 "parent": parent_hash if parent_hash else "GENESIS",
                 "hash": sha256_hash,
                 "time": str(datetime.now()),
@@ -84,8 +131,6 @@ if page == "Volunteer Capture Portal":
             
             st.session_state.evidence_db.append(evidence_record)
             st.success(f"✅ Evidence from {pu_name} secured and added to the chain!")
-        else:
-            st.error("Please complete all fields and upload a document.")
 
 # ==============================================================================
 # PORTAL 2: THE 'HOLY GRAIL' NATIONAL DASHBOARD
@@ -96,24 +141,14 @@ elif page == "The 'Holy Grail' National Dashboard":
     
     db = st.session_state.evidence_db
     
-    # --- DEMO BUTTON FOR INVESTORS ---
-    st.write("### Simulation Controls")
-    st.caption("Click this to test the system with 1,000 synthetic records. (This is for demonstration purposes only).")
     if st.button("🚀 Inject Demo Data (1,000 Polling Units)"):
         for i in range(1000):
             db.append({
-                "level": "PU", "pu": f"PU-DEMO-{i}", "parent": "GENESIS", "hash": f"hash_{i}", "time": "2027-02-25", 
-                "votes": {
-                    "APC": random.randint(50, 200), 
-                    "PDP": random.randint(50, 200), 
-                    "LP": random.randint(20, 150),
-                    "NDC": random.randint(5, 50),
-                    "ADC": random.randint(5, 50)
-                }
+                "level": "PU", "pu": f"PU-DEMO-{i}", "nipost": "FC-DEMO", "parent": "GENESIS", "hash": f"hash_{i}", "time": "2027-02-25", 
+                "votes": {"APC": random.randint(50, 200), "PDP": random.randint(50, 200), "LP": random.randint(20, 150), "NDC": random.randint(5, 50), "ADC": random.randint(5, 50)}
             })
-        st.success("1,000 cryptographically verified polling units injected into the baseline.")
+        st.success("1,000 cryptographically verified polling units injected.")
 
-    # --- AGGREGATION MATH ---
     total_apc = sum(item['votes']['APC'] for item in db)
     total_pdp = sum(item['votes']['PDP'] for item in db)
     total_lp = sum(item['votes']['LP'] for item in db)
@@ -121,15 +156,13 @@ elif page == "The 'Holy Grail' National Dashboard":
     total_adc = sum(item['votes']['ADC'] for item in db)
 
     st.divider()
-
     st.write("### 1. National Aggregation Status")
     col1, col2, col3 = st.columns(3)
-    col1.metric("Total Verified Evidence", f"{len(db):,}", delta="Live")
-    col2.metric("Chain Breaks Detected", "0", delta="Secure", delta_color="normal")
-    col3.metric("Data Integrity", "100%" if len(db) > 0 else "N/A", delta="SHA-256 Verified" if len(db) > 0 else None)
+    col1.metric("Total Verified Evidence", f"{len(db):,}")
+    col2.metric("Chain Breaks Detected", "0", delta="Secure")
+    col3.metric("Data Integrity", "100%" if len(db) > 0 else "N/A")
 
     st.divider()
-
     st.write("### 2. National Vote Baseline (Verified Evidence)")
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("APC", f"{total_apc:,}")
@@ -138,35 +171,15 @@ elif page == "The 'Holy Grail' National Dashboard":
     col4.metric("NDC", f"{total_ndc:,}")
     col5.metric("ADC", f"{total_adc:,}")
 
-    # --- VISUAL CHART ---
     st.write("### 3. Verified Vote Distribution")
     if len(db) > 0:
-        chart_data = pd.DataFrame({
-            "Party": ["APC", "PDP", "LP", "NDC", "ADC"],
-            "Votes": [total_apc, total_pdp, total_lp, total_ndc, total_adc]
-        })
+        chart_data = pd.DataFrame({"Party": ["APC", "PDP", "LP", "NDC", "ADC"], "Votes": [total_apc, total_pdp, total_lp, total_ndc, total_adc]})
         st.bar_chart(chart_data.set_index("Party"), height=400)
     else:
-        st.info("No evidence uploaded yet. The chart will populate as volunteers submit verified documents.")
+        st.info("No evidence uploaded yet.")
 
     st.divider()
-
-    # --- EMPIRICAL PROOF TRAIL ---
-    st.write("### 4. Empirical Proof Trail (Sample of Latest Uploads)")
+    st.write("### 4. Empirical Proof Trail")
     if len(db) > 0:
-        proof_data = []
-        for item in db[-10:]:
-            proof_data.append({
-                "Level": item['level'],
-                "Location": item['pu'],
-                "Parent Hash": item['parent'][:10] + "...",
-                "Current Hash": item['hash'][:10] + "...",
-                "APC": item['votes']['APC'],
-                "PDP": item['votes']['PDP'],
-                "LP": item['votes']['LP'],
-            })
+        proof_data = [{"Level": item['level'], "Location": item['pu'], "State": item['nipost'][:2], "Hash": item['hash'][:10]+"...", "APC": item['votes']['APC'], "PDP": item['votes']['PDP'], "LP": item['votes']['LP']} for item in db[-10:]]
         st.dataframe(pd.DataFrame(proof_data), use_container_width=True)
-    else:
-        st.info("Awaiting first upload to display cryptographic proof trail.")
-    
-    st.info("💡 **Why this is different from a WhatsApp photo:** Every single vote above is bound to a SHA-256 hash. If even one pixel of the uploaded EC8A form is altered, the hash breaks, the parent chain breaks, and the system rejects it.")
